@@ -1,0 +1,331 @@
+-- rename the column 'Sales[mln]' and 'Original language'
+sp_rename 'dbo.books_table.[Sales[mln]]]','Sales_in_mln','column' 
+sp_rename '[dbo].[books_table].[Original language]','Language','column'
+
+
+-- get rid of expression like '(?%)' in book titles
+update [dbo].[books_table]
+set book=isnull(stuff([book],patindex('%(?%',[book]),patindex('%?)%',[book]),''),[book])
+
+
+-- check if the 'book' column contains the same titles 
+begin
+	declare @total_books int
+	declare @distinct_books int
+	select @total_books=count([Book]) from [dbo].[books_table]
+	select @distinct_books=count(distinct [Book]) from [dbo].[books_table]
+	if @total_books = @distinct_books
+		print 'no same titles'
+	else
+		print 'there are the same titles'
+end
+
+
+--create function which shows top n books regarding sales
+drop function if exists topn
+go
+create function topn (@n int)
+returns table
+as
+return
+	select 
+		top (@n) book
+		,[Sales_in_mln]
+	from [dbo].[books_table]
+	order by 
+		[Sales_in_mln] desc
+
+
+-- show top 10 books regarding sales
+select * from topn(10)
+
+
+-- show table with additional column that displays how much each item has lost compared to the item above it in the ranking
+with the_same_sales_asc as
+(
+select TOP (select count(*) from books_table) 
+	[Book]
+	,[Author(s)]
+	,row_number() over (partition by [Sales_in_mln] order by [Sales_in_mln] desc, [Book],[Author(s)]) as 'rn'
+from [dbo].[books_table]
+order by [Sales_in_mln] desc,[Book],[Author(s)]
+)
+
+select 
+	rank() over (order by b.[Sales_in_mln] desc) as 'rank'
+	,b.* 
+	,lag(b.[Sales_in_mln],ss.rn) over(order by b.[Sales_in_mln] desc,b.[Book],b.[Author(s)])-[Sales_in_mln] as 'loss_to_higher_position'
+from [dbo].[books_table] b join the_same_sales_asc ss on b.Book=ss.[Book] 
+order by [Sales_in_mln] desc,b.[Book],b.[Author(s)]
+
+
+--create view that displays how much books in particular language is in the ranking
+create view language_view as
+select 
+	[Language]
+	, count(*) as 'count_position'
+from [dbo].[books_table]
+group by [Language]
+
+
+-- compare number of position in particular language with number of position in particular language in top50
+with ranking as
+(
+select
+	rank() over (order by [Sales_in_mln] desc) as r
+	,*
+from [dbo].[books_table]
+),
+all_vs_top50 as
+(
+select 
+	[Language]
+	,count(*) as count_top50
+from ranking
+where r <51
+group by [Language]
+)
+select 
+	l.*
+	,isnull(t.count_top50,0) as count_top50
+	,sum(count_position) over () as total_position
+	,sum(count_top50) over () as total_position_top
+	,format(cast(count_position as decimal(5,2))/cast((select count([Language]) from books_table) as decimal(5,2))*100,'0.##') + '%'as 'percentage_all'
+	,format(cast(isnull(t.count_top50,0) as decimal(5,2))/cast((select sum(count_top50) from all_vs_top50) as decimal(5,2))*100,'0.##') + '%' as 'percentage_top'
+	,case 
+	when cast(isnull(t.count_top50,0) as decimal(5,2))/cast((select sum(count_top50) from all_vs_top50) as decimal(5,2))=cast(count_position as decimal(5,2))/cast((select count([Language]) from books_table) as decimal(5,2))
+	then 
+		'equal'
+	else
+		iif(cast(isnull(t.count_top50,0) as decimal(5,2))/cast((select sum(count_top50) from all_vs_top50) as decimal(5,2))-cast(count_position as decimal(5,2))/cast((select count([Language]) from books_table) as decimal(5,2))>0,'+','-') 
+	end as 'comparison'
+from language_view l left join all_vs_top50 t on l.[Language]=t.[Language]
+order by count_position desc
+
+
+-- show periods with number of books over average 
+select 
+	*
+from
+	(
+	select 
+		[period]
+		,count([Book]) as 'count_book'
+	from books_table
+	group by [period]	
+	) cb
+where count_book>(select avg(count_book)
+				  from
+					(
+					select 
+						[period]
+						,count([Book]) as 'count_book'
+					from books_table
+					group by [period]
+					) cb
+				)
+
+-- Genre analysis
+with genre as
+(
+select 
+	[Genre]
+	,count([Book]) as 'count_books'
+	,sum([Sales_in_mln]) as 'sales'
+from [dbo].[books_table]
+group by [Genre]
+having count([Book])>1
+)
+select 
+	* 
+	, cast(sales/count_books as decimal(4,2)) as 'sales_per_book'
+from genre
+where genre !='no data'
+order by sales desc
+
+-- rename column ''period'
+
+sp_rename '[dbo].[books_table].[period]','Period','column'
+
+
+--check if there are some redundant information in table (for example one Authors write more then one book but all books in one language) if so, create separate table
+drop procedure if exists show_distinct
+go
+create procedure show_distinct @column nvarchar(100) as
+begin
+	declare @instruction nvarchar(max)
+	set @instruction = 
+		' 
+		SELECT 
+		distinct [Author(s)], '+ quotename(@column) +' as '+@column+ ' from [dbo].[books_table]
+		'
+	begin
+		exec(@instruction)
+	end
+end
+
+
+drop procedure if exists check_col
+go
+create procedure check_col @columnName nvarchar(100) as
+begin
+	declare @instruction nvarchar(max)
+	set @instruction = 
+	' 
+	select
+		[Author(s)]
+		,count(col) as count
+	into temp
+	from
+		(
+		SELECT 
+		distinct [Author(s)], '+ quotename(@columnName) +' as col from [dbo].[books_table])sbq
+		group by [Author(s)]
+		having count(col)>1
+	'
+	exec(@instruction)
+
+	if (select count(*) from temp) =0
+		begin	
+			exec show_distinct @column=@columnName
+			if @@ROWCOUNT<(select count(*) from books_table)
+				begin			
+					declare @instruction2 nvarchar(max)
+					set @instruction2 = 
+						' 
+						SELECT 
+						distinct [Author(s)], '+ quotename(@columnName) +' as '+@columnName+ ' into ' +quotename(@columnName)+' from [dbo].[books_table]
+						'
+					declare @instruction3 nvarchar(max)
+					set @instruction3 = 'drop table if exists ' + quotename(@columnName)
+					declare @instruction4 nvarchar(max)
+					set @instruction4='alter table [dbo].[books_table] drop column '+quotename(@columnName)
+					exec(@instruction3)
+					exec(@instruction2)
+					exec(@instruction4)
+				end
+		end
+	drop table temp
+end
+
+exec check_col @columnName='Language'
+exec check_col @columnName='Period'
+exec check_col @columnName='Genre'
+
+
+-- divide the 'books_table' into several thematic tables
+select 
+	[Book]
+	,[Date]
+	,[Period]
+into Period
+from books_table
+
+alter table books_table
+drop column [Date],[Period]
+
+
+select 
+	[Book]
+	,[Genre]
+into Genre
+from books_table
+
+alter table books_table
+drop column [Genre]
+
+
+select 
+	[Book]
+	,[Sales_in_mln]
+into Sales
+from books_table
+
+alter table books_table
+drop column [Sales_in_mln]
+
+sp_rename '[dbo].[books_table]','Author(s)'
+
+-- add primary keys
+select max (len(book)) from [dbo].[Author(s)]
+
+alter table [dbo].[Author(s)]
+alter column [Book] varchar(72) not null
+
+alter table [dbo].[Genre]
+alter column [Book] varchar(72) not null
+
+alter table [dbo].[Period]
+alter column [Book] varchar(72) not null
+
+alter table [dbo].[Sales]
+alter column [Book] varchar(72) not null
+
+alter table [dbo].[Author(s)]
+add constraint PK_Author primary key ([Book])
+
+alter table [dbo].[Genre]
+add constraint PK_Genre primary key ([Book])
+
+alter table [dbo].[Period]
+add constraint PK_Period primary key ([Book])
+
+alter table [dbo].[Sales]
+add constraint PK_Sales primary key ([Book])
+
+select max (len([Author(s)])) from [dbo].[Language]
+
+alter table [dbo].[Language]
+alter column [Author(s)] varchar(72) not null
+
+alter table [dbo].[Language]
+add constraint PK_Language primary key ([Author(s)])
+
+
+--add foreign keys
+
+alter table [dbo].[Genre]
+add constraint FK_Genre_Author foreign key ([Book]) references [dbo].[Author(s)]([Book])
+
+alter table [dbo].[Period]
+add constraint FK_Perion_Author foreign key ([Book]) references [dbo].[Author(s)]([Book])
+
+alter table [dbo].[Sales] 
+add constraint FK_Sales_Author foreign key ([Book]) references [dbo].[Author(s)]([Book])
+
+alter table [dbo].[Author(s)]
+alter column [Author(s)] varchar(72)
+
+alter table [dbo].[Author(s)]
+add constraint FK_Author_Language foreign key ([Author(s)]) references [dbo].[Language]([Author(s)])
+
+
+--alter function topn
+ALTER function [dbo].[topn] (@n int)
+returns table
+as
+return
+	select 
+		top (@n) book
+		,[Sales_in_mln]
+	from [dbo].[Sales]
+	order by 
+		[Sales_in_mln] desc
+
+
+--create view that displays sales per author
+create view authors_view as
+select 
+	a.[Author(s)]
+	,sum(s.[Sales_in_mln]) as 'total_sales'
+from [dbo].[Author(s)] a join [dbo].[Sales] s on a.[Book]=s.Book
+group by a.[Author(s)]
+
+-- alter 'language_view'
+alter view language_view as
+select 
+	[Language]
+	, count(*) as 'count_position'
+from [dbo].[Language]
+group by [Language]
+
