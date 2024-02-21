@@ -1,1 +1,197 @@
 
+
+# źródło: https://www.kaggle.com/datasets/drahulsingh/best-selling-books
+
+import pandas as pd
+
+file=pd.read_csv(r'C:\Users\Sobala\Desktop\ŁUKASZ\nauka\projekty\1\best-selling-books.csv')
+
+#show first few rows
+print(file.head(3))
+
+#examine dataframe
+print("duplicates: ",file.duplicated().sum(),'\n')
+print("shape: ",file.shape,'\n')
+print("info: ",file.info())
+
+
+#change columns names
+file.rename(columns={'First published':'Date','Approximate sales in millions':'Sales[mln]'},inplace=True)
+file.columns
+
+
+#Check if the dataframe contains null values, and if it does, display their respective indexes
+
+col=file.columns
+l2=list(map(lambda x: file[x].isnull().sum(),col)) 
+
+for el,el2 in zip(col,l2):
+    if el2>0:
+        print(el2, 'nulls in column:', el)
+        null_indexes=list(file[file[el].isnull()].index)
+        print('indexes contains nulls:', null_indexes)
+
+# replace missing values with 'no data' 
+file['Genre'].fillna('no data', inplace=True)
+
+print(file['Genre'])
+
+
+# define a function that shows the correlation between a specific column and other columns
+
+def col_corr (main_col,l_range=0,h_range=0,exceptions=[]):
+    from sklearn import preprocessing
+    data_encoder = preprocessing.LabelEncoder()
+    column_list = [col for col in file.columns if col not in exceptions and col!=main_col]
+    if file[main_col].dtype=='float64' or file[main_col].dtype== 'int64':
+        for col in column_list:
+
+            if file[col].dtype=='float64' or file[col].dtype== 'int64':
+                cor=file[col].corr(file[main_col])
+                if cor > h_range or cor < l_range:
+                    print(f"correlation between {col} and {main_col}: ",file[col].corr(file[main_col]))
+                else: 
+                    pass
+            else:
+        #transform non-numerical labels in column into numerical labels, then show correlation between main and current column
+                file['label']=data_encoder.fit_transform(file[col])            
+                cor=file['label'].corr(file[main_col])
+                if cor > h_range or cor < l_range:
+                    print(f"correlation between {col} and {main_col}: {cor}")
+                else: 
+                    pass
+    else:
+        file['main_col_label']=data_encoder.fit_transform(file[main_col])
+        for col in column_list:
+            if file[col].dtype=='float64' or file[col].dtype== 'int64':
+                cor=file[col].corr(file['main_col_label'])
+                if cor > h_range or cor < l_range:
+                    print(f"correlation between {col} and {main_col}: {cor}")
+                else: 
+                    pass
+            else:
+        #transform non-numerical labels in column into numerical labels, then show correlation between main and current column
+                file['label']= data_encoder.fit_transform(file[col])
+                cor=file['label'].corr(file['main_col_label'])
+                if cor > h_range or cor < l_range:
+                    print(f"correlation between {col} and {main_col}: {cor}")
+                else: 
+                    pass
+    if 'label' in file.columns:
+        del file['label']
+    else: 
+        pass
+    if 'main_col_label' in file.columns: 
+        del file['main_col_label']
+    else: 
+        pass
+
+
+#check if there is correlation (possitive or negative) above 0.5  between columns
+exceptions=[]
+for main_col in file.columns:
+    col_corr(main_col,-0.5,0.5,exceptions)
+    exceptions.append(main_col)
+
+
+#discretization
+
+file['Date'].describe()
+
+
+file['period']=pd.cut(file['Date'],bins=[1300,1900,1950,1975,2000,2025])
+print(file[['Date','period']].head(80))
+
+
+# examine Sales diversity and outliers detection
+
+def check_outliers(df,ser):
+    import matplotlib.pyplot as plt
+    plt.boxplot(df[ser])
+    
+    
+    Q1_date=df[ser].quantile(0.25)
+    Q3_date=df[ser].quantile(0.75)
+    
+    IQR_date=Q3_date-Q1_date
+    
+    lower_outliers_list=list(df[ser][df[ser]<Q1_date-1.5*IQR_date])
+    higher_outliers_list=list(df[ser][df[ser]>Q3_date+1.5*IQR_date])
+    
+    print("number or lower outliers: ",(df[ser]<Q1_date-1.5*IQR_date).sum())
+    print("list of lower outlier: ",lower_outliers_list)
+    
+    print("number or higher outliers: ",(df[ser]>Q3_date+1.5*IQR_date).sum())
+    print("list of higher outlier: ",higher_outliers_list)
+    
+    return lower_outliers_list,higher_outliers_list
+
+check_outliers(file,'Sales[mln]')
+
+CV=(file['Sales[mln]'].std())/(file['Sales[mln]'].mean())
+
+print('coefficient of variation: ',CV)
+
+# show books with very high sales (based on outliers)
+lower_outliers_list,higher_outliers_list=check_outliers(file,'Sales[mln]')
+
+sorted_by_sales=file.sort_values(by='Sales[mln]',ascending=False)
+
+sorted_by_sales['Book'].head(len(higher_outliers_list))
+
+### visualizations
+sorted_by_date=file.sort_values(by='Date')
+
+# examine Date column and outliers detection
+
+def check_and_cut_outliers(df,ser):
+
+    lower_outliers_list,higher_outliers_list=check_outliers(df,ser)
+     
+    if len(lower_outliers_list)!=0 and len(higher_outliers_list)!=0:
+        lower_limit=max(lower_outliers_list)
+        higher_limit=min(higher_outliers_list)
+        df=df[(df[ser]>lower_limit) & (df[ser]<higher_limit)]
+    elif len(lower_outliers_list)==0:
+        higher_limit=min(higher_outliers_list)
+        df=df[df[ser]<higher_limit]
+    elif len(higher_outliers_list)==0:  
+        lower_limit=max(lower_outliers_list)
+        df=df[df[ser]>lower_limit]
+    else:
+        pass
+    return df
+
+# cut outliers from dataframe sorted by date
+sorted_by_date=check_and_cut_outliers(sorted_by_date,'Date')
+
+# Change in sales over time - visualization
+import matplotlib.pyplot as plt
+x=sorted_by_date['Date']
+                
+y=sorted_by_date['Sales[mln]']
+
+plt.plot(x,y)
+
+
+#transfer dataframe to sql table
+
+file['period']=file['period'].astype(str)
+
+import pymssql
+from sqlalchemy import create_engine
+from sqlalchemy.types import DATE, FLOAT, INTEGER, VARCHAR
+
+myserver = "DESKTOP-93T6HCJ\LUKASZ"
+mydatabase = "books"
+
+# create engine using SQLAlchemy
+engine = create_engine(f'mssql+pymssql://{myserver}/{mydatabase}')
+
+
+# Create the table
+data_types = {'Book': VARCHAR, 'Author': VARCHAR, 'Orginal_langage': VARCHAR, 'Date': INTEGER, 'Sales': FLOAT, 'Genre': VARCHAR, 'Genre_label': INTEGER, 'Period': VARCHAR}
+file.to_sql('books_table2', engine, index=False, schema='dbo', if_exists='replace', dtype=data_types)
+
+
+
